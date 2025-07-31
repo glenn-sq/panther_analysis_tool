@@ -112,6 +112,7 @@ from panther_analysis_tool.constants import (
 )
 from panther_analysis_tool.destination import FakeDestination
 from panther_analysis_tool.enriched_event_generator import EnrichedEventGenerator
+from panther_analysis_tool.json_formatter import JsonOutputFormatter
 from panther_analysis_tool.log_schemas import user_defined
 from panther_analysis_tool.schemas import (
     ANALYSIS_CONFIG_SCHEMA,
@@ -158,8 +159,8 @@ class AnalysisIDConflictException(Exception):
 # exception for conflicting ids
 class AnalysisContainsDuplicatesException(Exception):
     def __init__(self, analysis_id: str, invalid_fields: List[str]):
-        self.message = f'Specification file for [{analysis_id}] contains fields \
-        with duplicate values: [{", ".join(x for x in invalid_fields)}]'
+        self.message = f"Specification file for [{analysis_id}] contains fields \
+        with duplicate values: [{', '.join(x for x in invalid_fields)}]"
         super().__init__(self.message)
 
 
@@ -167,7 +168,7 @@ class AnalysisContainsDuplicatesException(Exception):
 class AnalysisContainsInvalidTableNamesException(Exception):
     def __init__(self, analysis_id: str, invalid_table_names: List[str]):
         self.message = (
-            f'Specification file for [{analysis_id}] contains invalid Panther table names: [{", ".join(x for x in invalid_table_names)}]. '
+            f"Specification file for [{analysis_id}] contains invalid Panther table names: [{', '.join(x for x in invalid_table_names)}]. "
             'Try using a fully qualified table name such as "panther_logs.public.log_type" '
             "or setting --ignore-table-names for queries using non-Panther or non-Snowflake tables."
         )
@@ -670,7 +671,10 @@ def publish_github(tag: str, body: str, headers: dict, release_url: str, release
     if body:
         payload["body"] = body
     response = requests.post(
-        release_url, data=json.dumps(payload, allow_nan=False), headers=headers, timeout=10
+        release_url,
+        data=json.dumps(payload, allow_nan=False),
+        headers=headers,
+        timeout=10,
     )
     if response.status_code != 201:
         logging.error("error creating release (%s) in repo (%s)", tag, release_url)
@@ -753,7 +757,7 @@ def load_analysis(
 
 
 # pylint: disable=too-many-locals
-def test_analysis(
+def test_analysis(  # pylint: disable=too-many-return-statements,too-many-statements
     args: argparse.Namespace, backend: typing.Optional[BackendClient] = None
 ) -> Tuple[int, list]:
     """Imports each policy or rule and runs their tests.
@@ -765,6 +769,11 @@ def test_analysis(
         A tuple of the return code, and a list of tuples containing invalid specs and their error.
     """
     logging.info("Testing analysis items in %s", args.path)
+
+    # Initialize JSON formatter if JSON output is requested
+    json_formatter = None
+    if hasattr(args, "output_format") and args.output_format == "json":
+        json_formatter = JsonOutputFormatter()
 
     # First classify each file, always include globals and data models location
     specs, invalid_specs = load_analysis(
@@ -829,6 +838,7 @@ def test_analysis(
         all_test_results=all_test_results,
         backend=backend,
         test_names=getattr(args, "test_names", None),
+        json_formatter=json_formatter,
     )
     invalid_specs.extend(invalid_detections)
 
@@ -839,6 +849,33 @@ def test_analysis(
     # cleanup tmp global dir
     cleanup_global_helpers(specs.globals)
 
+    # Handle JSON formatting for invalid specs and skipped tests
+    if json_formatter:
+        for spec in invalid_specs:
+            json_formatter.add_invalid_spec(spec)
+        for filename, spec in skipped_tests:
+            json_formatter.add_skipped_test(filename, spec)
+
+    # Handle output formatting based on format choice
+    if json_formatter:
+        # Determine return code
+        return_code = 1 if invalid_specs or failed_tests else 0
+
+        # Generate JSON output
+        json_output = json_formatter.get_json_output(
+            args.path,
+            len(specs.detections + specs.simple_detections),
+            failed_tests,
+            return_code,
+        )
+        print(json_output)
+
+        if invalid_specs:
+            return 1, invalid_specs
+        return int(bool(failed_tests)), invalid_specs
+
+    # Original text output format
+    # pylint: disable=too-many-nested-blocks
     if all_test_results and (all_test_results.passed or all_test_results.errored):
         for outcome in ["passed", "errored"]:
             # Skip if test passed and we only want to print failed tests:
@@ -847,23 +884,32 @@ def test_analysis(
             sorted_results = sorted(getattr(all_test_results, outcome).items())
             for detection_id, test_result_packages in sorted_results:
                 if test_result_packages:
-                    print(detection_id)
+                    # Only print detection ID for text output, not JSON output
+                    if not json_formatter:
+                        print(detection_id)
                 for test_result_package in test_result_packages:
                     if len(test_result_package.output) > 0:
-                        print(test_result_package.output)
+                        # Only print output for text output, not JSON output
+                        if not json_formatter:
+                            print(test_result_package.output)
                     _print_test_result(
                         detection=test_result_package.detection,
                         test_result=test_result_package.result,
                         failed_tests=test_result_package.failed_tests,
+                        json_formatter=json_formatter,
                     )
-                    print("")
-    print_summary(
-        args.path,
-        len(specs.detections + specs.simple_detections),
-        failed_tests,
-        invalid_specs,
-        skipped_tests,
-    )
+                    # Only print empty line for text output, not JSON output
+                    if not json_formatter:
+                        print("")
+    # Only print summary for text output, not JSON output
+    if not json_formatter:
+        print_summary(
+            args.path,
+            len(specs.detections + specs.simple_detections),
+            failed_tests,
+            invalid_specs,
+            skipped_tests,
+        )
 
     #  if the classic format was invalid, just exit
     if invalid_specs:
@@ -971,6 +1017,7 @@ def setup_run_tests(  # pylint: disable=too-many-locals,too-many-arguments,too-m
     all_test_results: typing.Optional[TestResultsContainer] = None,
     backend: typing.Optional[BackendClient] = None,
     test_names: typing.Optional[List[str]] = None,
+    json_formatter: typing.Optional[JsonOutputFormatter] = None,
 ) -> Tuple[DefaultDict[str, List[Any]], List[Any], List[Tuple[str, dict]]]:
     invalid_specs = []
     failed_tests: DefaultDict[str, list] = defaultdict(list)
@@ -1043,9 +1090,11 @@ def setup_run_tests(  # pylint: disable=too-many-locals,too-many-arguments,too-m
             if "body" in found_base_detection:
                 detection_args["body"] = found_base_detection.get("body")
             else:
-                detection_args["path"] = os.path.join(
-                    found_base_path, found_base_detection["Filename"]  # type: ignore
-                )
+                if found_base_path is not None:
+                    detection_args["path"] = os.path.join(
+                        found_base_path,
+                        found_base_detection["Filename"],
+                    )
         elif is_simple_detection(analysis_spec):
             # skip tests when the body is empty
             if not analysis_spec.get("body"):
@@ -1069,13 +1118,23 @@ def setup_run_tests(  # pylint: disable=too-many-locals,too-many-arguments,too-m
         detection_id = (
             detection.detection_id if detection is not None else analysis_spec.get("RuleID", "")
         )
-        if not all_test_results:
+
+        # Start detection in JSON formatter
+        if json_formatter:
+            json_formatter.start_detection(detection_id, analysis_spec.get("AnalysisType"))
+
+        # Only print detection ID for text output, not JSON output
+        if not all_test_results and not json_formatter:
             print(detection_id)
 
         # if there is a setup exception, no need to run tests
         if detection is not None and detection.setup_exception:
             invalid_specs.append((analysis_spec_filename, detection.setup_exception))
-            print("\n")
+            if json_formatter:
+                json_formatter.finish_detection()
+            # Only print newline for text output, not JSON output
+            if not json_formatter:
+                print("\n")
             continue
 
         failed_tests = run_tests(
@@ -1090,9 +1149,15 @@ def setup_run_tests(  # pylint: disable=too-many-locals,too-many-arguments,too-m
             all_test_results,
             correlation_rule_results,
             test_names,
+            json_formatter,
         )
 
-        if not all_test_results:
+        # Finish detection in JSON formatter
+        if json_formatter:
+            json_formatter.finish_detection()
+
+        # Only print empty line for text output, not JSON output
+        if not all_test_results and not json_formatter:
             print("")
     return failed_tests, invalid_specs, skipped_tests
 
@@ -1503,13 +1568,22 @@ def check_packs(args: argparse.Namespace) -> Tuple[int, str]:
         id_ = get_spec_id(spec)
         tags = set(tag.lower() for tag in spec.get("Tags", []))
         # Only check rules, not luts, policies, queries, etc.
-        if spec.get("AnalysisType") not in ("rule", "scheduled_rule", "correlation_rule"):
+        if spec.get("AnalysisType") not in (
+            "rule",
+            "scheduled_rule",
+            "correlation_rule",
+        ):
             continue
         # Ignore rules with DEPRECATED in the title
         if "deprecated" in spec.get("DisplayName", "").lower():
             continue
         # Ignore rules with certain tags
-        if {"deprecated", "no pack", "configuration required", "multi-table query"} & tags:
+        if {
+            "deprecated",
+            "no pack",
+            "configuration required",
+            "multi-table query",
+        } & tags:
             continue
 
         if id_ not in all_items_in_packs:
@@ -1572,15 +1646,19 @@ def run_tests(  # pylint: disable=too-many-arguments
     all_test_results: typing.Optional[TestResultsContainer],
     correlation_rule_test_results: List[Dict[str, Any]],
     test_names: typing.Optional[List[str]] = None,
+    json_formatter: typing.Optional[JsonOutputFormatter] = None,
 ) -> DefaultDict[str, list]:
     if len(analysis.get("Tests", [])) < minimum_tests:
         failed_tests[detection_id].append(
-            f'Insufficient test coverage: {minimum_tests} tests required but only {len(analysis.get("Tests", []))} found'
+            f"Insufficient test coverage: {minimum_tests} tests required but only {len(analysis.get('Tests', []))} found"
         )
 
     # First check if any tests exist, so we can print a helpful message if not
     if "Tests" not in analysis:
-        print(f"\tNo tests configured for {detection_id}")
+        if json_formatter:
+            json_formatter.print_no_tests_message(detection_id)
+        else:
+            print(f"\tNo tests configured for {detection_id}")
         return failed_tests
 
     failed_tests = _run_tests(
@@ -1594,6 +1672,7 @@ def run_tests(  # pylint: disable=too-many-arguments
         correlation_rule_test_results,
         detection_id,
         test_names,
+        json_formatter,
     )
 
     if minimum_tests > 1 and not (
@@ -1662,6 +1741,7 @@ def _run_tests(  # pylint: disable=too-many-arguments
     correlation_rule_test_results: List[Dict[str, Any]],
     detection_id: str,
     test_names: typing.Optional[List[str]] = None,
+    json_formatter: typing.Optional[JsonOutputFormatter] = None,
 ) -> DefaultDict[str, list]:
     status_passed = "passed"
     status_errored = "errored"
@@ -1758,7 +1838,7 @@ def _run_tests(  # pylint: disable=too-many-arguments
                 )
             )
         else:
-            _print_test_result(detection, test_result, failed_tests)
+            _print_test_result(detection, test_result, failed_tests, json_formatter)
 
     return failed_tests
 
@@ -1767,7 +1847,14 @@ def _print_test_result(
     detection: typing.Optional[Detection],
     test_result: TestResult,
     failed_tests: DefaultDict[str, list],
+    json_formatter: typing.Optional[JsonOutputFormatter] = None,
 ) -> None:
+    # Add test result to JSON formatter if available
+    if json_formatter:
+        json_formatter.add_test_result(detection, test_result, failed_tests)
+        return
+
+    # Original text output format
     status_pass = Fore.GREEN + "PASS" + Style.RESET_ALL
     status_fail = Fore.RED + "FAIL" + Style.RESET_ALL
 
@@ -1793,14 +1880,14 @@ def _print_test_result(
                 # add this as output to the failed test spec as well
                 failed_tests[detection.detection_id].append(f"{test_result.name}:{printable_name}")
                 print(
-                    f'\t\t[{status_fail}] [{printable_name}] {function_result.get("error", {}).get("message")}'
+                    f"\t\t[{status_fail}] [{printable_name}] {function_result.get('error', {}).get('message')}"
                 )
             # if it didn't error, we simply need to check if the output was as expected
             elif not function_result.get("matched", True):
                 failed_tests[detection.detection_id].append(f"{test_result.name}:{printable_name}")
-                print(f'\t\t[{status_fail}] [{printable_name}] {function_result.get("output")}')
+                print(f"\t\t[{status_fail}] [{printable_name}] {function_result.get('output')}")
             else:
-                print(f'\t\t[{status_pass}] [{printable_name}] {function_result.get("output")}')
+                print(f"\t\t[{status_pass}] [{printable_name}] {function_result.get('output')}")
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -1945,6 +2032,12 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=VERSION_STRING)
     parser.add_argument("--debug", action="store_true", dest="debug")
     parser.add_argument("--skip-version-check", dest="skip_version_check", action="store_true")
+    parser.add_argument(
+        "--output-format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results (default: text)",
+    )
     subparsers = parser.add_subparsers()
 
     # -- release command

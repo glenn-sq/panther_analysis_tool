@@ -67,6 +67,8 @@ optional arguments:
   --version             show program's version number and exit
   --debug
   --skip-version-check
+  --output-format {text,json}
+                        Output format for results (default: text)
 ```
 
 ### Test
@@ -102,8 +104,153 @@ $ panther_analysis_tool test --filter RuleID=AWS.CloudTrail.Stopped --test-names
         ...
         [PASS] Error Stopping CloudTrail
                 [PASS] [rule] false
+
+### Output Formats
+
+The Panther Analysis Tool supports two output formats: text (default) and JSON.
+
+#### Text Output (Default)
+
+Text output provides human-readable results with colored status indicators:
+
+```bash
+$ panther_analysis_tool test --path tests/fixtures/valid_policies/
+[INFO]: Testing analysis packs in tests/fixtures/valid_policies/
+
+AWS.IAM.MFAEnabled
+    [PASS] Root MFA not enabled fails compliance
+    [PASS] User MFA not enabled fails compliance
 ```
 
+#### JSON Output
+
+JSON output provides structured data suitable for programmatic processing and integration with CI/CD pipelines. The `--output-format json` option is supported by the following commands:
+
+- `test` - Test results and validation output
+- `validate` - Bulk upload validation results  
+- `check-connection` - API connection status
+- `benchmark` - Performance test results
+
+```bash
+$ panther_analysis_tool --output-format json test --path tests/fixtures/valid_policies/
+```
+
+Example JSON output structure for the `test` command:
+
+```json
+{
+  "summary": {
+    "path": "tests/fixtures/valid_policies/",
+    "return_code": 0,
+    "total_detections": 2,
+    "tested_detections": 2,
+    "total_tests": 4,
+    "passed_tests": 4,
+    "failed_tests": 0,
+    "invalid_specs": 0,
+    "skipped_tests": 0,
+    "detections_with_failures": 0
+  },
+  "detections": [
+    {
+      "detection_id": "AWS.IAM.MFAEnabled",
+      "detection_type": "RULE",
+      "test_results": [
+        {
+          "name": "Root MFA not enabled fails compliance",
+          "passed": true,
+          "functions": {
+            "rule": {
+              "matched": true,
+              "output": "true"
+            },
+            "title": {
+              "output": "Root MFA not enabled"
+            },
+            "dedup": {
+              "output": "defaultDedupString:AWS.IAM.MFAEnabled"
+            },
+            "alertContext": {
+              "output": {
+                "Arn": "arn:aws:iam::123456789012:root",
+                "CreateDate": "2019-01-01T00:00:00Z"
+              }
+            }
+          }
+        }
+      ],
+      "failed_tests": []
+    }
+  ],
+  "invalid_specs": [],
+  "skipped_tests": []
+}
+```
+
+Example JSON output for the `validate` command:
+
+```bash
+$ panther_analysis_tool --output-format json validate --path tests/fixtures/valid_policies/
+```
+
+```json
+{
+  "success": true,
+  "message": "Validation success",
+  "errors": [],
+  "warnings": []
+}
+```
+
+Example JSON output for the `check-connection` command:
+
+```bash
+$ panther_analysis_tool --output-format json check-connection
+```
+
+```json
+{
+  "success": true,
+  "message": "Connection successful",
+  "api_host": "https://api.panther.com"
+}
+```
+
+Example JSON output for the `benchmark` command:
+
+```bash
+$ panther_analysis_tool --output-format json benchmark --filter RuleID=AWS.CloudTrail.MFAEnabled
+```
+
+```json
+{
+  "rule_id": "AWS.CloudTrail.MFAEnabled",
+  "log_type": "AWS.CloudTrail",
+  "iterations": 10,
+  "completed_iterations": 10,
+  "read_time_nanos": [1000000, 1200000, 1100000],
+  "processing_time_nanos": [500000, 600000, 550000],
+  "read_time_seconds": [0.001, 0.0012, 0.0011],
+  "processing_time_seconds": [0.0005, 0.0006, 0.00055],
+  "avg_read_time_seconds": 0.0011,
+  "avg_processing_time_seconds": 0.00055,
+  "median_read_time_seconds": 0.0011,
+  "median_processing_time_seconds": 0.00055,
+  "success": true
+}
+```
+
+The JSON output includes:
+- **summary**: Overall statistics about the test run (for `test` command)
+- **detections**: Detailed test results for each detection (for `test` command)
+- **invalid_specs**: Any specifications that failed validation (for `test` command)
+- **skipped_tests**: Tests that were skipped (e.g., disabled detections) (for `test` command)
+- **success**: Boolean indicating if the operation succeeded (for all commands)
+- **message**: Human-readable status message (for all commands)
+- **errors**: Array of error details (for `validate` command)
+- **warnings**: Array of warning details (for `validate` command)
+- **api_host**: Panther API host URL (for `check-connection` command)
+- **performance metrics**: Detailed timing and statistics (for `benchmark` command)
 
 ### Upload
 

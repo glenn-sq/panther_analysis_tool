@@ -12,6 +12,7 @@ from panther_analysis_tool.analysis_utils import ClassifiedAnalysis
 from panther_analysis_tool.backend.client import Client as BackendClient
 from panther_analysis_tool.backend.client import MetricsParams, PerfTestParams
 from panther_analysis_tool.constants import AnalysisTypes, ReplayStatus
+from panther_analysis_tool.json_formatter import JsonOutputFormatter
 from panther_analysis_tool.util import log_and_write_to_file
 from panther_analysis_tool.zip_chunker import (
     ZipArgs,
@@ -32,7 +33,7 @@ class PerformanceTestIteration:
         )
 
 
-def run(  # pylint: disable=too-many-locals
+def run(  # pylint: disable=too-many-locals,too-many-return-statements
     backend: BackendClient, args: argparse.Namespace
 ) -> Tuple[int, str]:
     if backend is None or not backend.supports_perf_test():
@@ -95,6 +96,35 @@ def run(  # pylint: disable=too-many-locals
             )
         )
 
+    # Handle JSON output if requested
+    if hasattr(args, "output_format") and args.output_format == "json":
+        if not logged:
+            # Success case
+            read_times = [i.read_time_nanos for i in iterations]
+            processing_times = [i.processing_time_nanos for i in iterations]
+            return 0, JsonOutputFormatter.format_benchmark_output(
+                rule_id=rule_or_err.analysis_spec.get("RuleID", ""),
+                log_type=log_type,
+                iterations=args.iterations,
+                completed_iterations=len(iterations),
+                read_times=read_times,
+                processing_times=processing_times,
+                success=True,
+            )
+
+        # Error case
+        return 1, JsonOutputFormatter.format_benchmark_output(
+            rule_id=rule_or_err.analysis_spec.get("RuleID", ""),
+            log_type=log_type,
+            iterations=args.iterations,
+            completed_iterations=len(iterations),
+            read_times=[],
+            processing_times=[],
+            success=False,
+            error_message="Benchmark failed or timed out",
+        )
+
+    # Original text output
     if not logged:
         log_output(args, hour_or_err, iterations, rule_or_err, now)
 
